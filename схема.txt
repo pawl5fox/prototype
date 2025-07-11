@@ -1,0 +1,167 @@
+Схема структуры и работы агентной системы на LangChain/ZeroMQ
+
+Ниже приведена полная схема компонентов проекта, взаимодействий между ними и используемых протоколов обмена данными.
+
+1. Компоненты системы
+
+ActionLLM-Оркестратор (Python сервис)
+
+Подключение к локальной LLM через HuggingFace (transformers или llama.cpp)
+
+Генерация и маршрутизация задач
+
+Хранение метаданных задачи
+
+Обработчик ZeroMQ сообщений
+
+Агенты (Python-классы)
+
+FileAgent: операции с файлами и директориями, UAC-обёртка
+
+ProcessAgent: парсинг и управление процессами
+
+APIAgent: взаимодействие с внешними API
+
+AnalyticsAgent: ИИ-аналитика данных
+
+Каждый агент реализует общий интерфейс:
+
+def handle(task: dict) -> dict
+
+подписка на ZeroMQ топик agent.<name>.tasks
+
+публикация результатов на agent.<name>.results
+
+ZeroMQ Message Bus
+
+XPUB/XSUB или PUB/SUB топологии
+
+Топики:
+
+orchestrator.tasks
+
+orchestrator.results
+
+agent.<name>.tasks
+
+agent.<name>.results
+
+Память (Memory Store)
+
+Redis (in-memory) для краткосрочной истории
+
+SQLite для долговременного хранения контекста
+
+Подключается к каждому агенту и оркестратору через адаптер LangChain Memory API
+
+PersonaLLM-Интерфейс
+
+Чат-сервис (REST или WebSocket)
+
+Хранение сессий, матрёшка памяти
+
+Посылает запросы к ActionLLM для запуска задач и получает результаты
+
+Мониторинг и Логи
+
+Logging Handler: все события ZeroMQ и LLM через LangChain Callbacks сохраняются в JSON-файле
+
+По необходимости запускается Streamlit дашборд для визуализации очередей и статуса агентов
+
+2. Общий поток данных
+
+┌────────────────────────────────────────────────────────────────────┐
+│    PersonaLLM (Chat UI)                                            │
+│  [HTTP/WS ↔]                                                       │
+│    оркестратор API                                                 │
+└───────────────┬────────────────────────────────────────────────────┘
+                │ 1. Клиент -> Описание задачи
+                ▼
+┌────────────────────────────────────────────────────────────────────┐
+│    ActionLLM-Оркестратор                                           │
+│  - Генерация подзадач                                              │
+│  - Маршрутизация через ZeroMQ PUB on `orchestrator.tasks`         │
+└───────┬─────────────────────────────────────────────────────────────┘
+        │ 2. PUB `orchestrator.tasks` {task_id, agent: <name>, params}
+        ▼
+┌────────────────────┐      ┌────────────────────┐      ┌─────────────────────┐
+│  FileAgent         │      │  APIAgent          │      │  AnalyticsAgent     │
+│ SUB: agent.file    │...   │ SUB: agent.api     │...   │ SUB: agent.analytics│
+│ handle(task)       │      │ handle(task)       │      │ handle(task)        │
+│ PUB: agent.file.results │ │ PUB: agent.api.results │  │ PUB: agent.analytics.results│
+└───────┬────────────┘      └───────┬────────────┘      └───────┬─────────────┘
+        │                           │                           │
+        └────────────┐   ┌──────────┴──────────┐   ┌──────────┘
+                     ▼   ▼                     ▼   ▼
+                  ┌────────────────────────────────────────────┐
+                  │  Orchestrator SUB on `agent.*.results`     │
+                  │  - Сбор результатов                        │
+                  │  - Обновление памяти                       │
+                  │  - Формирование итогового ответа           │
+                  └───────┬────────────────────────────────────┘
+                          │ 3. PUB `orchestrator.results` {task_id, payload}
+                          ▼
+┌────────────────────────────────────────────────────────────────────┐
+│    PersonaLLM (Chat UI)                                            │
+│  [HTTP/WS ↔]                                                       │
+│    оркестратор API                                                 │
+└────────────────────────────────────────────────────────────────────┘
+
+3. Детали обмена данными
+
+Формат сообщений: JSON с полями
+
+task_id — UUID
+
+agent — название агента
+
+params — словарь параметров
+
+result — словарь с результатом обработки
+
+timestamp — ISO-строка времени
+
+ZeroMQ топики:
+
+orchestrator.tasks (PUB)
+
+agent.<name>.tasks (SUB для каждого агента)
+
+agent.<name>.results (PUB от агента)
+
+orchestrator.results (SUB оркестратора)
+
+Память:
+
+Подсистема Memory Adapter (LangChain)
+
+Redis хранит короткий контекст (последние N сообщений)
+
+SQLite накапливает логи диалогов и итоговые ответы
+
+UAC / Права:
+
+Каждый агент при необходимости вызывает обёртку runas
+
+Логика проверки ctypes.windll.shell32.IsUserAnAdmin()
+
+4. Структура репозитория
+
+project_root/
+├─ orchestrator/
+│   ├─ orchestrator.py
+│   ├─ runner_zmq.py
+│   ├─ memory_adapter.py
+│   └─ config.yaml
+├─ agents/
+│   ├─ file_agent.py
+│   ├─ process_agent.py
+│   ├─ api_agent.py
+│   └─ analytics_agent.py
+├─ persona_ui/
+│   ├─ server.py
+│   └─ templates/
+├─ tests/
+│   └─ test_agents.py
+├─ requirements.txt
+└─ README.md
